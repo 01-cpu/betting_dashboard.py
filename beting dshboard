@@ -1,0 +1,298 @@
+# betting_dashboard.py
+import streamlit as st
+import numpy as np
+import random
+import matplotlib.pyplot as plt
+from matplotlib.ticker import FuncFormatter
+import pandas as pd
+import time
+
+# ---------- Page config ----------
+st.set_page_config(page_title="Betting Simulator Dashboard", layout="wide", initial_sidebar_state="expanded")
+
+# ---------- Dark CSS ----------
+st.markdown(
+    """
+    <style>
+    .reportview-container, .main, .block-container {
+        background-color: #0f1115;
+        color: #e6eef8;
+    }
+    .stButton>button {
+        background-color:#1f2937;
+        color: #e6eef8;
+    }
+    .stSlider>div>div>div>div {
+        color: #e6eef8;
+    }
+    .css-1d391kg { color: #e6eef8; }
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
+
+# ---------- Helper functions ----------
+def money(x):
+    return f"${x:,.2f}"
+
+def simulate_one_run(strategy, initial_bankroll, initial_stake, max_bet, odds, p_win, commission, n_bets, martingale_mult):
+    """
+    Simulate a single run (sequence of bets) and return bankroll history and final stats.
+    strategy: 'flat' | 'martingale' | 'modified'
+    """
+    bankroll = initial_bankroll
+    stake = initial_stake
+    history = [bankroll]
+    loss_streak = 0
+
+    for i in range(n_bets):
+        # Ensure stake cap
+        stake = min(stake, max_bet)
+
+        if random.random() < p_win:
+            # Win: profit is stake * (odds - 1), minus commission on winnings
+            profit = stake * (odds - 1)
+            profit = profit * (1 - commission)
+            bankroll += profit
+            stake = initial_stake
+            loss_streak = 0
+        else:
+            # Loss: lose the stake
+            bankroll -= stake
+            loss_streak += 1
+            if strategy == "flat":
+                stake = initial_stake
+            elif strategy == "martingale":
+                stake = stake * 2
+            elif strategy == "modified":
+                stake = stake * martingale_mult
+
+            # Cap stake to max_bet
+            if stake > max_bet:
+                stake = max_bet
+
+        history.append(bankroll)
+
+        # If bankrupt, stop early
+        if bankroll <= 0:
+            bankroll = 0
+            break
+
+    return np.array(history)
+
+
+@st.cache_data
+def run_multiple_runs(strategy, runs, **kwargs):
+    finals = []
+    histories = []
+    ruins = 0
+    for r in range(runs):
+        h = simulate_one_run(strategy, **kwargs)
+        finals.append(h[-1])
+        histories.append(h)
+        if h[-1] <= 0:
+            ruins += 1
+    return np.array(finals), histories, ruins
+
+# ---------- Sidebar controls ----------
+st.sidebar.header("Simulation Parameters")
+
+initial_bankroll = st.sidebar.number_input("Initial bankroll ($)", min_value=1.0, value=10000.0, step=100.0, format="%.2f")
+initial_stake = st.sidebar.number_input("Initial stake per bet ($)", min_value=0.1, value=10.0, step=1.0, format="%.2f")
+max_bet = st.sidebar.number_input("Max single bet cap ($)", min_value=initial_stake, value=1000.0, step=50.0, format="%.2f")
+odds = st.sidebar.number_input("Odds (decimal)", min_value=1.01, value=2.96, step=0.01, format="%.2f")
+p_win = st.sidebar.slider("Win probability (p)", min_value=0.01, max_value=0.99, value=0.77, step=0.01)
+commission_pct = st.sidebar.slider("House commission on winnings (%)", min_value=0.0, max_value=30.0, value=7.0, step=0.1)
+commission = commission_pct / 100.0
+n_bets = st.sidebar.number_input("Bets per run", min_value=10, max_value=1_000_000, value=10000, step=10)
+n_runs = st.sidebar.number_input("Simulation runs (for stats)", min_value=1, max_value=2000, value=100, step=1)
+martingale_mult = st.sidebar.slider("Modified martingale multiplier", min_value=1.01, max_value=3.0, value=1.51, step=0.01)
+
+st.sidebar.markdown("---")
+st.sidebar.markdown("Strategies simulated:\n\n- Flat staking (fixed stake)\n- Classic Martingale (×2 after loss)\n- Modified Martingale (×mult after loss)")
+
+# ---------- Main layout ----------
+st.title("🎲 Betting Simulator Dashboard — Dark Theme")
+st.markdown("Simulate `Flat`, `Classic Martingale`, and `Modified Martingale` strategies. "
+            "Use the sidebar to adjust parameters (odds, probability, commission, bet cap, etc.).")
+
+col1, col2 = st.columns([2, 1])
+
+with col2:
+    st.subheader("Quick controls")
+    run_button = st.button("Run Simulation (generate visuals)")
+    seed_button = st.button("Seed RNG (deterministic)")
+    if seed_button:
+        random.seed(42)
+        np.random.seed(42)
+        st.success("Random seed set to 42 (deterministic).")
+
+# ---------- Tabs ----------
+tabs = st.tabs(["Simulation", "ROI & Ruin", "Strategy Insights", "Raw Data"])
+
+# Precompute kwargs for simulate functions
+kwargs = dict(
+    initial_bankroll=initial_bankroll,
+    initial_stake=initial_stake,
+    max_bet=max_bet,
+    odds=odds,
+    p_win=p_win,
+    commission=commission,
+    n_bets=int(n_bets),
+    martingale_mult=martingale_mult
+)
+
+# ---------- Run simulations when user clicks ----------
+if run_button:
+    # Show progress
+    progress_text = st.empty()
+    progress_bar = st.progress(0)
+
+    # Run multiple simulations for each strategy (cached)
+    all_results = {}
+    strategies = ["flat", "martingale", "modified"]
+    for i, strat in enumerate(strategies):
+        progress_text.text(f"Running {strat} simulations ({i+1}/{len(strategies)}) ...")
+        finals, histories, ruins = run_multiple_runs(strat, int(n_runs), **kwargs)
+        all_results[strat] = {
+            "finals": finals,
+            "histories": histories,
+            "ruins": ruins
+        }
+        progress_bar.progress(int((i + 1) / len(strategies) * 100))
+        time.sleep(0.1)
+
+    progress_text.text("Preparing charts...")
+    progress_bar.progress(100)
+    time.sleep(0.2)
+
+    # ---------- Simulation Tab ----------
+    with tabs[0]:
+        st.subheader("Live single-run bankroll evolution (one run per strategy)")
+        # Plot a single representative run for each strategy
+        fig, ax = plt.subplots(figsize=(10, 5))
+        for strat, color in zip(strategies, ["#4cc9f0", "#f94144", "#f9c74f"]):
+            # pick the first run's history (deterministic if seeded)
+            hist = all_results[strat]["histories"][0]
+            ax.plot(hist, label=f"{strat.capitalize()}", alpha=0.9, color=color)
+        ax.set_xlabel("Bet number")
+        ax.set_ylabel("Bankroll ($)")
+        ax.set_title("Example run: bankroll evolution per strategy")
+        ax.legend()
+        ax.grid(True, color="#222")
+        ax.set_facecolor("#0f1115")
+        fig.patch.set_facecolor("#0f1115")
+        ax.tick_params(colors="#e6eef8")
+        for spine in ax.spines.values():
+            spine.set_color("#333")
+        st.pyplot(fig)
+
+        st.markdown("---")
+        st.subheader("Aggregate behavior (many runs)")
+        # Plot distribution of final bankrolls as histograms (overlay)
+        fig2, ax2 = plt.subplots(figsize=(10, 4))
+        bins = 40
+        for strat, color in zip(strategies, ["#4cc9f0", "#f94144", "#f9c74f"]):
+            finals = all_results[strat]["finals"]
+            ax2.hist(finals, bins=bins, alpha=0.6, label=strat.capitalize(), color=color)
+        ax2.set_title("Distribution of final bankrolls (multiple runs)")
+        ax2.set_xlabel("Final bankroll ($)")
+        ax2.set_ylabel("Frequency")
+        ax2.legend()
+        ax2.grid(axis="y", color="#222")
+        ax2.set_facecolor("#0f1115")
+        fig2.patch.set_facecolor("#0f1115")
+        st.pyplot(fig2)
+
+    # ---------- ROI & Ruin Tab ----------
+    with tabs[1]:
+        st.subheader("ROI and Ruin probability comparison")
+        summary_rows = []
+        for strat in strategies:
+            finals = all_results[strat]["finals"]
+            ruins = all_results[strat]["ruins"]
+            avg_final = np.mean(finals)
+            avg_profit = avg_final - initial_bankroll
+            avg_roi = (avg_profit / initial_bankroll) * 100
+            ruin_prob = ruins / n_runs
+            summary_rows.append({
+                "Strategy": strat.capitalize(),
+                "Avg Final ($)": avg_final,
+                "Avg Profit ($)": avg_profit,
+                "Avg ROI (%)": avg_roi,
+                "Ruin Prob (%)": ruin_prob * 100
+            })
+
+        df_summary = pd.DataFrame(summary_rows)
+        df_summary_display = df_summary.style.format({
+            "Avg Final ($)": "${:,.2f}",
+            "Avg Profit ($)": "${:,.2f}",
+            "Avg ROI (%)": "{:.2f}%",
+            "Ruin Prob (%)": "{:.2f}%"
+        })
+        st.table(df_summary_display)
+
+        # Bar charts
+        fig3, (ax3a, ax3b) = plt.subplots(1, 2, figsize=(12, 4))
+        names = df_summary["Strategy"]
+        ax3a.bar(names, df_summary["Avg ROI (%)"], color=["#4cc9f0", "#f94144", "#f9c74f"])
+        ax3a.set_title("Average ROI (%)")
+        ax3a.set_ylabel("ROI (%)")
+        ax3a.grid(axis="y", color="#222")
+
+        ax3b.bar(names, df_summary["Ruin Prob (%)"], color=["#4cc9f0", "#f94144", "#f9c74f"])
+        ax3b.set_title("Ruin Probability (%)")
+        ax3b.set_ylabel("Ruin Probability (%)")
+        ax3b.grid(axis="y", color="#222")
+
+        for axx in (ax3a, ax3b):
+            axx.set_facecolor("#0f1115")
+            axx.tick_params(colors="#e6eef8")
+            for spine in axx.spines.values():
+                spine.set_color("#333")
+        fig3.patch.set_facecolor("#0f1115")
+        st.pyplot(fig3)
+
+    # ---------- Strategy Insights Tab ----------
+    with tabs[2]:
+        st.subheader("Strategy Insights & Notes")
+        st.markdown(
+            f"""
+            **Parameters used:** odds={odds}, win probability={p_win}, commission={commission_pct}%,
+            initial stake={initial_stake}, initial bankroll={money(initial_bankroll)}, max bet={money(max_bet)}, bets/run={n_bets}, runs={n_runs}.
+            """
+        )
+        st.markdown("**Key insights:**")
+        st.markdown("- **Flat staking** normally gives the most stable ROI with low ruin probability.")
+        st.markdown("- **Classic Martingale (×2)** can produce many small wins but suffers rare catastrophic losses that drive ruin probability up.")
+        st.markdown("- **Modified Martingale (×1.51)** reduces the growth of stake after losses and tends to reduce ruin probability compared to ×2, but often reduces expected ROI as well.")
+        st.markdown("**Practical notes:**")
+        st.markdown("- House commission on winnings reduces the effective expected value per bet; include it when evaluating long-term profitability.")
+        st.markdown("- Max bet caps and finite bankroll make martingale-style systems risky: you face frequent moderate gains and rare, large losses.")
+        st.markdown("- Use these simulations to compare but remember real markets introduce additional risks (limits, delays, behavioral changes).")
+
+    # ---------- Raw Data Tab ----------
+    with tabs[3]:
+        st.subheader("Raw simulation outputs (first run per strategy)")
+        for strat in strategies:
+            st.markdown(f"**{strat.capitalize()}** — first run sample (bankroll over time)")
+            hist0 = all_results[strat]["histories"][0]
+            df_hist = pd.DataFrame({
+                "Bet": np.arange(len(hist0)),
+                "Bankroll": hist0
+            })
+            st.line_chart(df_hist.set_index("Bet"))
+            st.write(df_hist.head(20))
+
+    st.success("Simulation complete.")
+else:
+    # If not run yet, show a short explanation
+    with tabs[0]:
+        st.info("Click **Run Simulation** to generate visuals. Use the sidebar to change parameters. "
+                "For deterministic results, press **Seed RNG** first.")
+    with tabs[1]:
+        st.write("ROI & Ruin results will appear after you run the simulation.")
+    with tabs[2]:
+        st.write("Strategy insights and notes will appear after simulation runs.")
+    with tabs[3]:
+        st.write("Raw outputs will appear after simulation runs.")
